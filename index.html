@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ESG Explorer with ArcGIS JS</title>
+    <link
+      rel="stylesheet"
+      href="https://js.arcgis.com/4.30/esri/themes/light/main.css"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <aside id="panel">
+      <h1>ESG Explorer</h1>
+      <p>
+        Interactive ESG dashboard built with vanilla JavaScript and ArcGIS Maps SDK
+        for JavaScript.
+      </p>
+
+      <section>
+        <h2 class="collapsible-header" data-target="layerSelection"><span class="toggle-indicator">▼</span> Layer Selection</h2>
+        <div class="collapsible-content" id="layerSelection">
+          <fieldset>
+            <legend>🌱 ENVIRONMENT</legend>
+            <label><input type="checkbox" value="air-quality" class="layer-checkbox"> Air Quality</label>
+            <label><input type="checkbox" value="fire-hotspots" class="layer-checkbox"> Fire Hotspots</label>
+            <label><input type="checkbox" value="industrial-emissions" class="layer-checkbox"> Industrial Emissions</label>
+            <label><input type="checkbox" value="flood-risk" class="layer-checkbox"> Flood Risk</label>
+          </fieldset>
+
+          <fieldset>
+            <legend>🤝 SOCIAL</legend>
+            <label><input type="checkbox" value="population-density" class="layer-checkbox"> Population Density</label>
+            <label><input type="checkbox" value="hospitals" class="layer-checkbox"> Hospitals</label>
+          </fieldset>
+
+          <fieldset>
+            <legend>🏛 GOVERNANCE</legend>
+            <label><input type="checkbox" value="esg-compliance" class="layer-checkbox"> ESG Compliance</label>
+            <label><input type="checkbox" value="environmental-violations" class="layer-checkbox"> Environmental Violations</label>
+          </fieldset>
+        </div>
+      </section>
+
+      <section>
+        <h2 class="collapsible-header" data-target="bufferAnalysis"><span class="toggle-indicator">▼</span> Buffer Analysis</h2>
+        <div class="collapsible-content" id="bufferAnalysis">
+          <label>
+            Buffer Distance (km):
+            <input type="number" id="bufferDistance" min="0.1" max="50" step="0.1" value="5" />
+          </label>
+          <button id="activateBuffer">Activate Buffer Mode</button>
+          <button id="clearBuffer" style="display: none;">Clear Buffer</button>
+          <p id="bufferStatus" style="font-size: 0.85rem; color: #666;"></p>
+          <div id="bufferResults" style="margin-top: 1rem; display: none;">
+            <h3 style="margin: 0 0 0.5rem 0; font-size: 0.95rem;">Features in Buffer</h3>
+            <div id="resultsTable" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem;"></div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2 class="collapsible-header" data-target="measurementTools"><span class="toggle-indicator">▼</span> Measurement Tools</h2>
+        <div class="collapsible-content" id="measurementTools">
+          <fieldset>
+            <legend>Distance Measurement</legend>
+            <label>
+              Unit:
+              <select id="distanceUnit">
+                <option value="kilometers">Kilometers</option>
+                <option value="miles">Miles</option>
+                <option value="meters">Meters</option>
+              </select>
+            </label>
+            <button id="activateDistance">Measure Distance</button>
+            <button id="clearDistance" style="display: none;">Clear Distance</button>
+            <p id="distanceResult" style="font-size: 0.85rem; color: #666; margin-top: 0.5rem;"></p>
+          </fieldset>
+
+          <fieldset>
+            <legend>Area Measurement</legend>
+            <label>
+              Unit:
+              <select id="areaUnit">
+                <option value="squareKilometers">Square Kilometers</option>
+                <option value="squareMiles">Square Miles</option>
+                <option value="squareMeters">Square Meters</option>
+              </select>
+            </label>
+            <button id="activateArea">Measure Area</button>
+            <button id="clearArea" style="display: none;">Clear Area</button>
+            <p id="areaResult" style="font-size: 0.85rem; color: #666; margin-top: 0.5rem;"></p>
+          </fieldset>
+        </div>
+      </section>
+
+    </aside>
+
+    <main id="viewDiv"></main>
+
+    <div id="bufferPopup" class="buffer-popup hidden">
+      <div class="popup-header">
+        <h3>Buffer Analysis Results</h3>
+        <button id="togglePopup" class="toggle-btn">−</button>
+      </div>
+      <div class="popup-content">
+        <table id="featuresTable">
+          <thead>
+            <tr>
+              <th>Layer</th>
+              <th>Features Count</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody id="featuresTableBody">
+          </tbody>
+        </table>
+        <div id="featureDetails" class="feature-details hidden">
+          <h4 id="detailsTitle"></h4>
+          <div class="details-content">
+            <table id="detailsTable">
+              <thead id="detailsTableHead">
+              </thead>
+              <tbody id="detailsTableBody">
+              </tbody>
+            </table>
+          </div>
+          <button id="closeDetails" class="close-details-btn">Close Details</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://js.arcgis.com/4.30/"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

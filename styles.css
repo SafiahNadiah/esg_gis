@@ -517,13 +517,37 @@ button:active {
   align-items: center;
 }
 
-#chatInput {
+#mapAssistant input[type='text'],
+#mapAssistant input[type='password'],
+#mapAssistant select {
+  display: block;
   width: 100%;
   box-sizing: border-box;
-  padding: 0.45rem;
-  border: 1px solid #c9d5ea;
+  margin-top: 0.35rem;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid #c9d5ea !important;
   border-radius: 4px;
+  background: #fff !important;
+  color: #17365d;
   font-size: 0.86rem;
+  line-height: 1.25;
+  font-family: inherit;
+  -webkit-appearance: none;
+  appearance: none;
+  outline: none;
+  box-shadow: none;
+  overflow: visible !important;
+}
+
+#mapAssistant input[type='text']:focus,
+#mapAssistant input[type='password']:focus,
+#mapAssistant select:focus {
+  border-color: #2f6fb8 !important;
+  box-shadow: 0 0 0 2px rgba(47, 111, 184, 0.18);
+}
+
+#chatInput {
+  margin-top: 0;
 }
 
 .chat-send-btn {

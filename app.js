@@ -11,8 +11,9 @@ require([
   'esri/geometry/Polyline',
   'esri/geometry/Polygon',
   'esri/widgets/Sketch',
-  'esri/geometry/projection'
-], function (Map, MapView, FeatureLayer, Graphic, Legend, Expand, geometryEngine, GraphicsLayer, query, Polyline, Polygon, Sketch, projection) {
+  'esri/geometry/projection',
+  'esri/rest/locator'
+], function (Map, MapView, FeatureLayer, Graphic, Legend, Expand, geometryEngine, GraphicsLayer, query, Polyline, Polygon, Sketch, projection, locator) {
 
     // supabase client provided by index.html
     const supabase = window.supabaseClient;
@@ -1676,22 +1677,231 @@ require([
       return;
     }
 
-    const writer = createPdfReportWriter('Sketch Spatial Analysis Report');
-    if (!writer) {
+    const JsPdf = getJsPdfConstructor();
+    if (!JsPdf) {
+      alert('PDF library is not available. Reload the page and try again.');
       return;
     }
 
-    writer.writeLine('Project for new sketches: ' + getCurrentProjectNameForSave());
-    writer.writeLine('Summary: ' + (analysisSummaryEl.textContent || 'n/a'));
-    writer.writeLine('', false);
-    writer.writeLine('Type | Metric | Value', true);
+    const doc = new JsPdf({ orientation: 'portrait', unit: 'pt', format: 'a4' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const marginX = 36;
+    const usableWidth = pageWidth - marginX * 2;
+    const bottomLimit = pageHeight - 36;
+    let y = 34;
 
-    const rows = analysisRowsToCsv(lastAnalysisResult);
-    rows.slice(1).forEach(function (row) {
-      writer.writeLine(row[0] + ' | ' + row[1] + ' | ' + row[2]);
-    });
+    function addPage() {
+      doc.addPage();
+      y = 34;
+    }
 
-    writer.save('sketch-spatial-analysis-report.pdf');
+    function ensureSpace(requiredHeight) {
+      if (y + requiredHeight > bottomLimit) {
+        addPage();
+      }
+    }
+
+    function drawTitleBlock(title, metaLines) {
+      const wrappedMeta = [];
+      (metaLines || []).forEach(function (line) {
+        const parts = doc.splitTextToSize(String(line == null ? '' : line), usableWidth - 24);
+        if (parts.length === 0) {
+          wrappedMeta.push('');
+        } else {
+          wrappedMeta.push.apply(wrappedMeta, parts);
+        }
+      });
+
+      const blockHeight = 36 + wrappedMeta.length * 11 + 12;
+      ensureSpace(blockHeight + 8);
+
+      doc.setFillColor(244, 247, 251);
+      doc.setDrawColor(221, 228, 240);
+      doc.roundedRect(marginX, y, usableWidth, blockHeight, 6, 6, 'FD');
+
+      doc.setTextColor(23, 54, 93);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(15);
+      doc.text(title, marginX + 12, y + 21);
+
+      doc.setTextColor(60, 79, 105);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      let metaY = y + 37;
+      wrappedMeta.forEach(function (line) {
+        doc.text(line, marginX + 12, metaY);
+        metaY += 11;
+      });
+
+      y += blockHeight + 10;
+    }
+
+    function drawSectionHeader(title) {
+      ensureSpace(24);
+      doc.setFillColor(23, 54, 93);
+      doc.roundedRect(marginX, y, usableWidth, 18, 3, 3, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.text(String(title || ''), marginX + 10, y + 12);
+      y += 24;
+    }
+
+    function drawDataTable(headers, rows, widthRatios) {
+      const safeHeaders = Array.isArray(headers) ? headers : [];
+      const safeRows = Array.isArray(rows) ? rows : [];
+      if (safeHeaders.length === 0) {
+        return;
+      }
+
+      const ratios = Array.isArray(widthRatios) && widthRatios.length === safeHeaders.length
+        ? widthRatios
+        : safeHeaders.map(function () { return 1; });
+
+      const totalRatio = ratios.reduce(function (sum, ratio) {
+        const value = Number(ratio);
+        return sum + (Number.isFinite(value) && value > 0 ? value : 1);
+      }, 0);
+
+      const colWidths = ratios.map(function (ratio) {
+        const value = Number(ratio);
+        const safeRatio = Number.isFinite(value) && value > 0 ? value : 1;
+        return usableWidth * (safeRatio / totalRatio);
+      });
+
+      const cellPadX = 4;
+      const cellPadY = 4;
+      const lineHeight = 10;
+      let bodyRowIndex = 0;
+
+      function normalizeRowCells(cells) {
+        return safeHeaders.map(function (_header, index) {
+          return String(cells && cells[index] != null ? cells[index] : '');
+        });
+      }
+
+      function drawRow(cells, options) {
+        const opts = options || {};
+        const normalized = normalizeRowCells(cells);
+        const wrapped = normalized.map(function (cell, index) {
+          return doc.splitTextToSize(cell, Math.max(20, colWidths[index] - cellPadX * 2));
+        });
+        const maxLines = wrapped.reduce(function (maxValue, lines) {
+          return Math.max(maxValue, lines.length || 1);
+        }, 1);
+        const rowHeight = maxLines * lineHeight + cellPadY * 2;
+
+        if (!opts.isHeader && y + rowHeight > bottomLimit) {
+          addPage();
+          drawRow(safeHeaders, { isHeader: true });
+        }
+
+        let x = marginX;
+        wrapped.forEach(function (lines, index) {
+          doc.setDrawColor(221, 228, 240);
+          if (opts.isHeader) {
+            doc.setFillColor(238, 244, 252);
+            doc.rect(x, y, colWidths[index], rowHeight, 'FD');
+          } else if (opts.striped) {
+            doc.setFillColor(250, 252, 255);
+            doc.rect(x, y, colWidths[index], rowHeight, 'FD');
+          } else {
+            doc.setFillColor(255, 255, 255);
+            doc.rect(x, y, colWidths[index], rowHeight, 'FD');
+          }
+
+          if (opts.isHeader) {
+            doc.setTextColor(38, 77, 134);
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(9);
+          } else {
+            doc.setTextColor(23, 54, 93);
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(9);
+          }
+
+          let textY = y + cellPadY + 8;
+          lines.forEach(function (line) {
+            doc.text(line, x + cellPadX, textY);
+            textY += lineHeight;
+          });
+
+          x += colWidths[index];
+        });
+
+        y += rowHeight;
+      }
+
+      drawRow(safeHeaders, { isHeader: true });
+      safeRows.forEach(function (row) {
+        drawRow(row, { striped: bodyRowIndex % 2 === 1 });
+        bodyRowIndex += 1;
+      });
+      y += 8;
+    }
+
+    const generatedAt = new Date().toLocaleString();
+    const summaryText = analysisSummaryEl.textContent || 'n/a';
+    const projectName = getCurrentProjectNameForSave();
+    const totalIntersections = (lastAnalysisResult.intersections || []).reduce(function (sum, item) {
+      return sum + Number(item && item.count ? item.count : 0);
+    }, 0);
+    const hotspotCount = Number(lastAnalysisResult.hotspots && lastAnalysisResult.hotspots.count ? lastAnalysisResult.hotspots.count : 0);
+    const pollutionCount = Number(lastAnalysisResult.pollution && lastAnalysisResult.pollution.count ? lastAnalysisResult.pollution.count : 0);
+
+    const averageAqiValue = pollutionCount > 0 && Number.isFinite(Number(lastAnalysisResult.pollution.averageAQI))
+      ? Number(lastAnalysisResult.pollution.averageAQI)
+      : null;
+    const maxAqiValue = pollutionCount > 0 && Number.isFinite(Number(lastAnalysisResult.pollution.maxAQI))
+      ? Number(lastAnalysisResult.pollution.maxAQI)
+      : null;
+
+    const averageAqiText = averageAqiValue == null
+      ? 'n/a'
+      : averageAqiValue.toFixed(2) + ' (' + getAqiCategory(averageAqiValue).label + ')';
+
+    const maxAqiText = maxAqiValue == null
+      ? 'n/a'
+      : String(maxAqiValue) + ' (' + getAqiCategory(maxAqiValue).label + ')';
+
+    const hotspotTopBrightness = (lastAnalysisResult.hotspots && Array.isArray(lastAnalysisResult.hotspots.items)
+      ? lastAnalysisResult.hotspots.items
+      : []).reduce(function (maxValue, item) {
+      const value = Number(item && item.brightness);
+      return Number.isFinite(value) && value > maxValue ? value : maxValue;
+    }, -Infinity);
+
+    const contextRows = [
+      ['Project', projectName],
+      ['Generated', generatedAt],
+      ['Geometry type', String(lastAnalysisResult.geometryType || 'n/a')],
+      ['Intersections', String(totalIntersections)],
+      ['Hotspots', String(hotspotCount) + ' (severity: ' + getHotspotSeverity(hotspotTopBrightness).label + ')'],
+      ['Pollution stations', String(pollutionCount)],
+      ['Average AQI', averageAqiText],
+      ['Max AQI', maxAqiText],
+      ['Summary', summaryText]
+    ];
+
+    if (lastAnalysisResult.bufferResults && Number(lastAnalysisResult.bufferResults.distanceKm) > 0) {
+      contextRows.push(['Buffer distance', String(lastAnalysisResult.bufferResults.distanceKm) + ' km']);
+    }
+
+    const tableRows = analysisRowsToCsv(lastAnalysisResult).slice(1);
+
+    drawTitleBlock('Sketch Spatial Analysis Report', [
+      'Readable report with structured sections and tabular evidence.',
+      'Project: ' + projectName
+    ]);
+
+    drawSectionHeader('Report Context');
+    drawDataTable(['Field', 'Value'], contextRows, [0.32, 0.68]);
+
+    drawSectionHeader('Detailed Results');
+    drawDataTable(['Type', 'Metric', 'Value'], tableRows, [0.2, 0.34, 0.46]);
+
+    doc.save('sketch-spatial-analysis-report.pdf');
   }
 
   function exportAllSketchesAnalysisPdf() {
@@ -1701,37 +1911,269 @@ require([
       return;
     }
 
-    const writer = createPdfReportWriter('All Sketches Analysis Report');
-    if (!writer) {
+    const JsPdf = getJsPdfConstructor();
+    if (!JsPdf) {
+      alert('PDF library is not available. Reload the page and try again.');
       return;
+    }
+
+    const doc = new JsPdf({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const marginX = 32;
+    const usableWidth = pageWidth - marginX * 2;
+    const bottomLimit = pageHeight - 34;
+    let y = 30;
+
+    function addPage() {
+      doc.addPage();
+      y = 30;
+    }
+
+    function ensureSpace(requiredHeight) {
+      if (y + requiredHeight > bottomLimit) {
+        addPage();
+      }
+    }
+
+    function drawTitleBlock(title, metaLines) {
+      const wrappedMeta = [];
+      (metaLines || []).forEach(function (line) {
+        const parts = doc.splitTextToSize(String(line == null ? '' : line), usableWidth - 24);
+        if (parts.length === 0) {
+          wrappedMeta.push('');
+        } else {
+          wrappedMeta.push.apply(wrappedMeta, parts);
+        }
+      });
+
+      const blockHeight = 34 + wrappedMeta.length * 11 + 12;
+      ensureSpace(blockHeight + 8);
+
+      doc.setFillColor(244, 247, 251);
+      doc.setDrawColor(221, 228, 240);
+      doc.roundedRect(marginX, y, usableWidth, blockHeight, 6, 6, 'FD');
+
+      doc.setTextColor(23, 54, 93);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(15);
+      doc.text(title, marginX + 12, y + 20);
+
+      doc.setTextColor(60, 79, 105);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      let metaY = y + 35;
+      wrappedMeta.forEach(function (line) {
+        doc.text(line, marginX + 12, metaY);
+        metaY += 11;
+      });
+
+      y += blockHeight + 10;
+    }
+
+    function drawSectionHeader(title) {
+      ensureSpace(24);
+      doc.setFillColor(23, 54, 93);
+      doc.roundedRect(marginX, y, usableWidth, 18, 3, 3, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.text(String(title || ''), marginX + 10, y + 12);
+      y += 24;
+    }
+
+    function drawDataTable(headers, rowsData, widthRatios) {
+      const safeHeaders = Array.isArray(headers) ? headers : [];
+      const safeRows = Array.isArray(rowsData) ? rowsData : [];
+      if (safeHeaders.length === 0) {
+        return;
+      }
+
+      const ratios = Array.isArray(widthRatios) && widthRatios.length === safeHeaders.length
+        ? widthRatios
+        : safeHeaders.map(function () { return 1; });
+
+      const totalRatio = ratios.reduce(function (sum, ratio) {
+        const value = Number(ratio);
+        return sum + (Number.isFinite(value) && value > 0 ? value : 1);
+      }, 0);
+
+      const colWidths = ratios.map(function (ratio) {
+        const value = Number(ratio);
+        const safeRatio = Number.isFinite(value) && value > 0 ? value : 1;
+        return usableWidth * (safeRatio / totalRatio);
+      });
+
+      const cellPadX = 4;
+      const cellPadY = 4;
+      const lineHeight = 10;
+      let bodyRowIndex = 0;
+
+      function normalizeRowCells(cells) {
+        return safeHeaders.map(function (_header, index) {
+          return String(cells && cells[index] != null ? cells[index] : '');
+        });
+      }
+
+      function drawRow(cells, options) {
+        const opts = options || {};
+        const normalized = normalizeRowCells(cells);
+        const wrapped = normalized.map(function (cell, index) {
+          return doc.splitTextToSize(cell, Math.max(20, colWidths[index] - cellPadX * 2));
+        });
+        const maxLines = wrapped.reduce(function (maxValue, lines) {
+          return Math.max(maxValue, lines.length || 1);
+        }, 1);
+        const rowHeight = maxLines * lineHeight + cellPadY * 2;
+
+        if (!opts.isHeader && y + rowHeight > bottomLimit) {
+          addPage();
+          drawRow(safeHeaders, { isHeader: true });
+        }
+
+        let x = marginX;
+        wrapped.forEach(function (lines, index) {
+          doc.setDrawColor(221, 228, 240);
+          if (opts.isHeader) {
+            doc.setFillColor(238, 244, 252);
+            doc.rect(x, y, colWidths[index], rowHeight, 'FD');
+          } else if (opts.striped) {
+            doc.setFillColor(250, 252, 255);
+            doc.rect(x, y, colWidths[index], rowHeight, 'FD');
+          } else {
+            doc.setFillColor(255, 255, 255);
+            doc.rect(x, y, colWidths[index], rowHeight, 'FD');
+          }
+
+          if (opts.isHeader) {
+            doc.setTextColor(38, 77, 134);
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(9);
+          } else {
+            doc.setTextColor(23, 54, 93);
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(8.5);
+          }
+
+          let textY = y + cellPadY + 8;
+          lines.forEach(function (line) {
+            doc.text(line, x + cellPadX, textY);
+            textY += lineHeight;
+          });
+
+          x += colWidths[index];
+        });
+
+        y += rowHeight;
+      }
+
+      drawRow(safeHeaders, { isHeader: true });
+      safeRows.forEach(function (row) {
+        drawRow(row, { striped: bodyRowIndex % 2 === 1 });
+        bodyRowIndex += 1;
+      });
+      y += 8;
     }
 
     const userLabel = currentUser ? (currentUser.email || currentUser.phone || currentUser.id) : 'not signed in';
     const projectFilter = getSelectedProjectFilter();
-    writer.writeLine('User: ' + userLabel);
-    writer.writeLine('Project filter: ' + projectFilter);
-    writer.writeLine('Summary: ' + (allAnalysisSummaryEl.textContent || 'n/a'));
-    writer.writeLine('', false);
-    writer.writeLine('# | Saved ID | Type | Intersections | Hotspots | Stations | Avg AQI | Max AQI | Buffer km', true);
+    const generatedAt = new Date().toLocaleString();
+    const summaryText = allAnalysisSummaryEl.textContent || 'n/a';
 
-    rows.forEach(function (entry, index) {
-      writer.writeLine(
-        (index + 1) + ' | ' +
-        (entry.id ? String(entry.id).slice(0, 8) : 'n/a') + ' | ' +
-        (entry.geometryType || 'n/a') + ' | ' +
-        String(entry.intersectionTotal ?? 0) + ' | ' +
-        String(entry.hotspotCount ?? 0) + ' | ' +
-        String(entry.pollutionStations ?? 0) + ' | ' +
-        (Number.isFinite(entry.avgAQI) ? Number(entry.avgAQI).toFixed(2) : '0.00') + ' | ' +
-        (Number.isFinite(entry.maxAQI) ? Number(entry.maxAQI).toFixed(2) : '0.00') + ' | ' +
-        (entry.bufferKm == null ? '-' : String(entry.bufferKm))
-      );
+    const pointCount = rows.filter(function (row) {
+      return String(row && row.geometryType ? row.geometryType : '').toLowerCase() === 'point';
+    }).length;
+    const polygonCount = rows.filter(function (row) {
+      return String(row && row.geometryType ? row.geometryType : '').toLowerCase() === 'polygon';
+    }).length;
+
+    const totalIntersections = rows.reduce(function (sum, row) {
+      return sum + Number(row && row.intersectionTotal ? row.intersectionTotal : 0);
+    }, 0);
+
+    const totalHotspots = rows.reduce(function (sum, row) {
+      return sum + Number(row && row.hotspotCount ? row.hotspotCount : 0);
+    }, 0);
+
+    const totalStations = rows.reduce(function (sum, row) {
+      return sum + Number(row && row.pollutionStations ? row.pollutionStations : 0);
+    }, 0);
+
+    const analysisErrorCount = rows.filter(function (row) {
+      return !!(row && row.analysisError);
+    }).length;
+
+    const rowsWithAqi = rows.filter(function (row) {
+      return Number(row && row.pollutionStations ? row.pollutionStations : 0) > 0 && Number.isFinite(Number(row && row.avgAQI));
     });
+
+    const meanAvgAqi = rowsWithAqi.length > 0
+      ? rowsWithAqi.reduce(function (sum, row) {
+        return sum + Number(row.avgAQI);
+      }, 0) / rowsWithAqi.length
+      : null;
+
+    const peakAqi = rows.reduce(function (maxValue, row) {
+      const value = Number(row && row.maxAQI);
+      return Number.isFinite(value) && value > maxValue ? value : maxValue;
+    }, -Infinity);
+
+    const meanAqiText = Number.isFinite(meanAvgAqi)
+      ? Number(meanAvgAqi).toFixed(2) + ' (' + getAqiCategory(Number(meanAvgAqi)).label + ')'
+      : 'n/a';
+
+    const peakAqiText = Number.isFinite(peakAqi)
+      ? Number(peakAqi).toFixed(2) + ' (' + getAqiCategory(Number(peakAqi)).label + ')'
+      : 'n/a';
+
+    const contextRows = [
+      ['User', String(userLabel)],
+      ['Project filter', projectFilter],
+      ['Generated', generatedAt],
+      ['Sketches analyzed', String(rows.length)],
+      ['Geometry split', 'Point ' + pointCount + ', Polygon ' + polygonCount],
+      ['Intersections total', String(totalIntersections)],
+      ['Hotspots total', String(totalHotspots)],
+      ['Pollution stations total', String(totalStations)],
+      ['Mean sketch AQI', meanAqiText],
+      ['Peak AQI', peakAqiText],
+      ['Analysis errors', String(analysisErrorCount)],
+      ['Summary', summaryText]
+    ];
+
+    const detailRows = rows.map(function (entry, index) {
+      return [
+        String(index + 1),
+        entry.id ? String(entry.id).slice(0, 8) : 'n/a',
+        entry.geometryType || 'n/a',
+        String(entry.intersectionTotal ?? 0),
+        String(entry.hotspotCount ?? 0),
+        String(entry.pollutionStations ?? 0),
+        Number.isFinite(entry.avgAQI) ? Number(entry.avgAQI).toFixed(2) : '0.00',
+        Number.isFinite(entry.maxAQI) ? Number(entry.maxAQI).toFixed(2) : '0.00',
+        entry.bufferKm == null ? '-' : String(entry.bufferKm)
+      ];
+    });
+
+    drawTitleBlock('All Sketches Analysis Report', [
+      'Portfolio-level report with structured tables for prioritization.',
+      'Project filter: ' + projectFilter
+    ]);
+
+    drawSectionHeader('Report Context');
+    drawDataTable(['Field', 'Value'], contextRows, [0.3, 0.7]);
+
+    drawSectionHeader('Detailed Sketch Results');
+    drawDataTable(
+      ['#', 'Saved ID', 'Type', 'Intersections', 'Hotspots', 'Stations', 'Avg AQI', 'Max AQI', 'Buffer km'],
+      detailRows,
+      [0.62, 1.1, 1.04, 1.12, 0.98, 0.98, 1.02, 1.02, 0.92]
+    );
 
     const safeProject = (projectFilter === 'all' ? 'all-projects' : projectFilter)
       .toLowerCase()
       .replace(/[^a-z0-9_-]+/g, '_');
-    writer.save('all-sketches-analysis-report-' + safeProject + '.pdf');
+    doc.save('all-sketches-analysis-report-' + safeProject + '.pdf');
   }
 
   exportAnalysisCsvBtn.addEventListener('click', function () {
@@ -2929,6 +3371,442 @@ require([
   layerCheckboxes.forEach(function (checkbox) {
     checkbox.addEventListener('change', handleCheckboxChange);
   });
+
+  const openAiApiUrl = 'https://api.openai.com/v1/chat/completions';
+  const openAiApiKeyStorageKey = 'esg_openai_api_key_v1';
+  const geocodeServiceUrl = 'https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer';
+  const chatApiKeyInputEl = document.getElementById('chatApiKey');
+  const chatModelSelectEl = document.getElementById('chatModel');
+  const chatMessagesEl = document.getElementById('chatMessages');
+  const chatInputEl = document.getElementById('chatInput');
+  const sendChatBtnEl = document.getElementById('sendChatBtn');
+  const chatStatusEl = document.getElementById('chatStatus');
+  const mapAssistantConversation = [];
+  const maxConversationMessages = 12;
+
+  const layerAliasMap = {
+    'air quality': 'air-quality',
+    'aqi': 'air-quality',
+    'fire hotspot': 'fire-hotspots',
+    'fire hotspots': 'fire-hotspots',
+    'industrial emissions': 'industrial-emissions',
+    'flood risk': 'flood-risk',
+    'population density': 'population-density',
+    'hospital': 'hospitals',
+    'hospitals': 'hospitals',
+    'clinic': 'hospitals',
+    'clinics': 'hospitals',
+    'esg compliance': 'esg-compliance',
+    'environmental violation': 'environmental-violations',
+    'environmental violations': 'environmental-violations',
+    'violations': 'environmental-violations'
+  };
+
+  function setChatStatus(message, color) {
+    if (!chatStatusEl) {
+      return;
+    }
+
+    chatStatusEl.textContent = message;
+    if (color) {
+      chatStatusEl.style.color = color;
+    }
+  }
+
+  function appendChatMessage(role, text) {
+    if (!chatMessagesEl) {
+      return;
+    }
+
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-message ' + role;
+    bubble.textContent = String(text == null ? '' : text);
+    chatMessagesEl.appendChild(bubble);
+    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+  }
+
+  function getSelectedChatModel() {
+    return chatModelSelectEl && chatModelSelectEl.value ? chatModelSelectEl.value : 'gpt-4o-mini';
+  }
+
+  function getOpenAiApiKey() {
+    return chatApiKeyInputEl ? String(chatApiKeyInputEl.value || '').trim() : '';
+  }
+
+  function persistOpenAiApiKey() {
+    if (!chatApiKeyInputEl) {
+      return;
+    }
+
+    try {
+      const value = String(chatApiKeyInputEl.value || '').trim();
+      if (value) {
+        localStorage.setItem(openAiApiKeyStorageKey, value);
+      } else {
+        localStorage.removeItem(openAiApiKeyStorageKey);
+      }
+    } catch (_err) {
+      // Ignore storage failures.
+    }
+  }
+
+  function pushConversationMessage(role, content) {
+    mapAssistantConversation.push({
+      role: role,
+      content: String(content == null ? '' : content)
+    });
+
+    if (mapAssistantConversation.length > maxConversationMessages) {
+      mapAssistantConversation.splice(0, mapAssistantConversation.length - maxConversationMessages);
+    }
+  }
+
+  function resolveLayerIdFromText(value) {
+    const raw = String(value == null ? '' : value).trim().toLowerCase();
+    if (!raw) {
+      return null;
+    }
+
+    if (layerMap[raw]) {
+      return raw;
+    }
+
+    if (layerAliasMap[raw]) {
+      return layerAliasMap[raw];
+    }
+
+    const normalizedRaw = raw.replace(/[^a-z0-9]+/g, ' ').trim();
+    if (layerAliasMap[normalizedRaw]) {
+      return layerAliasMap[normalizedRaw];
+    }
+
+    const layerIdByTitle = Object.keys(layerMap).find(function (layerId) {
+      const layer = layerMap[layerId];
+      const title = String(layer && layer.title ? layer.title : '').toLowerCase();
+      return title === raw || title === normalizedRaw || title.indexOf(raw) !== -1 || raw.indexOf(title) !== -1;
+    });
+
+    return layerIdByTitle || null;
+  }
+
+  function buildMapAssistantSystemPrompt() {
+    const availableLayers = Object.keys(layerMap).map(function (layerId) {
+      const title = layerMap[layerId] && layerMap[layerId].title ? layerMap[layerId].title : layerId;
+      return layerId + ' => ' + title;
+    }).join('; ');
+
+    return [
+      'You are a map-control assistant for an ArcGIS ESG web map.',
+      'Return ONLY one JSON object and no extra text.',
+      'Use schema: {"action":"zoom_location|toggle_layer|set_buffer_km|answer|unknown","target":"string","enabled":true,"value":number,"reply":"short plain text"}.',
+      'When user asks to zoom or go to a place, use action "zoom_location" and target with that place name.',
+      'When user asks to show/hide a layer, use action "toggle_layer", set target to the best layer id or title, and enabled true/false.',
+      'When user asks to change buffer distance in km, use action "set_buffer_km" and value as number.',
+      'If no executable map command exists, use action "answer".',
+      'Available layer ids and titles: ' + availableLayers
+    ].join(' ');
+  }
+
+  function parseJsonObject(text) {
+    const raw = String(text == null ? '' : text).trim();
+    if (!raw) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(raw);
+    } catch (_err) {
+      const first = raw.indexOf('{');
+      const last = raw.lastIndexOf('}');
+      if (first !== -1 && last !== -1 && last > first) {
+        try {
+          return JSON.parse(raw.slice(first, last + 1));
+        } catch (_fallbackErr) {
+          return null;
+        }
+      }
+      return null;
+    }
+  }
+
+  async function requestMapAssistantCommand(userText) {
+    const apiKey = getOpenAiApiKey();
+    if (!apiKey) {
+      throw new Error('OpenAI API key is missing. Enter your key in Map Assistant settings.');
+    }
+
+    const payload = {
+      model: getSelectedChatModel(),
+      temperature: 0.1,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: buildMapAssistantSystemPrompt() }
+      ].concat(mapAssistantConversation.slice(-8)).concat([
+        { role: 'user', content: userText }
+      ])
+    };
+
+    const response = await fetch(openAiApiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + apiKey
+      },
+      body: JSON.stringify(payload)
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch (_err) {
+      data = null;
+    }
+
+    if (!response.ok) {
+      const errorMessage = data && data.error && data.error.message ? data.error.message : 'OpenAI API request failed.';
+      throw new Error(errorMessage);
+    }
+
+    const content = data && data.choices && data.choices[0] && data.choices[0].message
+      ? data.choices[0].message.content
+      : '';
+
+    const parsed = parseJsonObject(content);
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error('Assistant response was not valid JSON. Please try again.');
+    }
+
+    return parsed;
+  }
+
+  async function geocodeFirstCandidate(placeName, countryCode) {
+    const options = {
+      address: { SingleLine: placeName },
+      maxLocations: 1,
+      outFields: ['LongLabel', 'PlaceName', 'Type']
+    };
+
+    if (countryCode) {
+      options.countryCode = countryCode;
+    }
+
+    const candidates = await locator.addressToLocations(geocodeServiceUrl, options);
+    return Array.isArray(candidates) && candidates.length > 0 ? candidates[0] : null;
+  }
+
+  async function zoomMapToLocation(placeName) {
+    let candidate = null;
+
+    try {
+      candidate = await geocodeFirstCandidate(placeName, 'MYS');
+    } catch (_err) {
+      candidate = null;
+    }
+
+    if (!candidate) {
+      candidate = await geocodeFirstCandidate(placeName);
+    }
+
+    if (!candidate || !candidate.location) {
+      throw new Error('Location not found: ' + placeName);
+    }
+
+    if (candidate.extent) {
+      await view.goTo(candidate.extent.expand(1.35), { duration: 1200 });
+    } else {
+      await view.goTo({ target: candidate.location, zoom: 9 }, { duration: 1200 });
+    }
+
+    const longLabel = candidate.attributes && (candidate.attributes.LongLabel || candidate.attributes.PlaceName);
+    return longLabel || placeName;
+  }
+
+  function parseToggleEnabledValue(command) {
+    if (typeof command.enabled === 'boolean') {
+      return command.enabled;
+    }
+
+    const raw = String(command.value == null ? '' : command.value).toLowerCase().trim();
+    if (raw === 'false' || raw === 'off' || raw === 'hide' || raw === '0') {
+      return false;
+    }
+    if (raw === 'true' || raw === 'on' || raw === 'show' || raw === '1') {
+      return true;
+    }
+
+    return true;
+  }
+
+  async function executeMapAssistantCommand(command) {
+    const payload = command && typeof command === 'object' ? command : {};
+    const action = String(payload.action == null ? '' : payload.action).toLowerCase().trim();
+
+    if (action === 'zoom_location' || action === 'zoom' || action === 'zoom_to_location') {
+      const target = String(payload.target || payload.location || payload.place || '').trim();
+      if (!target) {
+        return { performed: false, message: 'No location was provided for zoom command.' };
+      }
+
+      const resolvedLabel = await zoomMapToLocation(target);
+      return { performed: true, message: 'Map zoomed to ' + resolvedLabel + '.' };
+    }
+
+    if (action === 'toggle_layer') {
+      const targetValue = payload.target || payload.layer || payload.layerId || '';
+      const layerId = resolveLayerIdFromText(targetValue);
+      if (!layerId || !layerMap[layerId]) {
+        return { performed: false, message: 'Layer not recognized: ' + String(targetValue || 'unknown') + '.' };
+      }
+
+      const enabled = parseToggleEnabledValue(payload);
+      layerMap[layerId].visible = enabled;
+
+      const checkbox = document.querySelector('.layer-checkbox[value="' + layerId + '"]');
+      if (checkbox) {
+        checkbox.checked = enabled;
+      }
+
+      const stateText = enabled ? 'enabled' : 'disabled';
+      return { performed: true, message: 'Layer ' + (layerMap[layerId].title || layerId) + ' is now ' + stateText + '.' };
+    }
+
+    if (action === 'set_buffer_km' || action === 'set_buffer_distance') {
+      const rawValue = payload.value != null ? payload.value : (payload.distanceKm != null ? payload.distanceKm : payload.distance_km);
+      const parsed = Number(rawValue);
+      if (!Number.isFinite(parsed)) {
+        return { performed: false, message: 'Buffer distance value is invalid.' };
+      }
+
+      const clamped = Math.min(50, Math.max(0.1, parsed));
+      const rounded = Math.round(clamped * 10) / 10;
+      if (typeof bufferDistanceInput !== 'undefined' && bufferDistanceInput) {
+        bufferDistanceInput.value = String(rounded);
+      }
+
+      return { performed: true, message: 'Buffer distance set to ' + rounded + ' km.' };
+    }
+
+    const reply = String(payload.reply || '').trim();
+    if (reply) {
+      return { performed: false, message: reply };
+    }
+
+    return { performed: false, message: 'No executable map command was detected.' };
+  }
+
+  function tryLocalMapCommand(text) {
+    const value = String(text == null ? '' : text).trim();
+    if (!value) {
+      return null;
+    }
+
+    const zoomMatch = value.match(/(?:zoom(?:\s+map)?\s+to|go\s+to|focus\s+on)\s+(.+)/i);
+    if (zoomMatch && zoomMatch[1]) {
+      return {
+        action: 'zoom_location',
+        target: zoomMatch[1].replace(/[?.!]+$/g, '').trim(),
+        reply: ''
+      };
+    }
+
+    return null;
+  }
+
+  async function submitMapAssistantMessage() {
+    if (!chatInputEl || !sendChatBtnEl) {
+      return;
+    }
+
+    const userText = String(chatInputEl.value || '').trim();
+    if (!userText) {
+      return;
+    }
+
+    appendChatMessage('user', userText);
+    chatInputEl.value = '';
+    sendChatBtnEl.disabled = true;
+    chatInputEl.disabled = true;
+    setChatStatus('Processing command...', '#264d86');
+
+    try {
+      let command = null;
+      const apiKey = getOpenAiApiKey();
+
+      if (apiKey) {
+        pushConversationMessage('user', userText);
+        command = await requestMapAssistantCommand(userText);
+        pushConversationMessage('assistant', JSON.stringify(command));
+      } else {
+        command = tryLocalMapCommand(userText);
+        if (!command) {
+          appendChatMessage('assistant', 'OpenAI API key is required for ChatGPT responses. Add your key and try again.');
+          setChatStatus('Missing OpenAI API key.', '#8a5a00');
+          return;
+        }
+      }
+
+      const executionResult = await executeMapAssistantCommand(command);
+      const replyText = command && command.reply ? String(command.reply).trim() : '';
+
+      if (executionResult.performed && replyText) {
+        appendChatMessage('assistant', executionResult.message + ' ' + replyText);
+      } else {
+        appendChatMessage('assistant', executionResult.message);
+      }
+
+      setChatStatus(executionResult.performed ? 'Command completed.' : 'Response ready.', executionResult.performed ? '#0f7a30' : '#264d86');
+    } catch (err) {
+      console.error('Map assistant error:', err);
+      appendChatMessage('assistant', 'I could not process that request. ' + (err && err.message ? err.message : 'Unexpected error.'));
+      setChatStatus('Command failed.', '#b42318');
+    } finally {
+      sendChatBtnEl.disabled = false;
+      chatInputEl.disabled = false;
+      chatInputEl.focus();
+    }
+  }
+
+  function initializeMapAssistant() {
+    if (!chatMessagesEl || !chatInputEl || !sendChatBtnEl) {
+      return;
+    }
+
+    if (chatApiKeyInputEl) {
+      try {
+        const storedApiKey = localStorage.getItem(openAiApiKeyStorageKey);
+        if (storedApiKey) {
+          chatApiKeyInputEl.value = storedApiKey;
+        }
+      } catch (_err) {
+        // Ignore storage failures.
+      }
+
+      chatApiKeyInputEl.addEventListener('change', persistOpenAiApiKey);
+      chatApiKeyInputEl.addEventListener('blur', persistOpenAiApiKey);
+    }
+
+    sendChatBtnEl.addEventListener('click', function () {
+      Promise.resolve(submitMapAssistantMessage()).catch(function (err) {
+        console.error('Map assistant submit error:', err);
+      });
+    });
+
+    chatInputEl.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter') {
+        return;
+      }
+
+      event.preventDefault();
+      Promise.resolve(submitMapAssistantMessage()).catch(function (err) {
+        console.error('Map assistant key-submit error:', err);
+      });
+    });
+
+    appendChatMessage('system', 'Map Assistant ready. Example: "zoom map to Selangor".');
+    setChatStatus('For production security, route OpenAI calls through your backend.', '#8a5a00');
+  }
+
+  initializeMapAssistant();
 
   const panelEl = document.getElementById('panel');
   const panelToggleBtn = document.getElementById('panelToggleBtn');
